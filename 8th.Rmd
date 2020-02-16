@@ -1,0 +1,152 @@
+---
+title: "Coursera Machine Learning 8th module"
+author: "Pavel Sonin"
+date: '10th of February 2020'
+output: html_document
+---
+
+**Background:**
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. 
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+**Project overview:**
+
+In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+More information is available from the website here: 
+<http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har>
+(see the section on the Weight Lifting Exercise Dataset).
+
+We will use machine learning alrogithms to predict if particular exercise is performed correctly, as per the sensors data.
+
+Main difficulty of the project is huge number of variables (160) in the data set and total unclarity in the beginning, which of them should we use, and the type of algorithm to select.
+
+**Analysis:**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+First we prepare and split data set into training and validation part, where we will validate performance of different algorithms. Multiple columns with missing values are removed.
+
+```{r echo=FALSE, include = TRUE}
+# downloading the data set 
+library(caret)
+set.seed(131113)
+
+setwd("D:/R/R Programming/8th")
+download.file(url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "training.csv")
+download.file(url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "testing.csv")
+training <- read.csv("training.csv")
+testing <- read.csv("testing.csv")
+
+# remove NAs columns from training data with our own function
+nacheck <- function(df) {
+    tmpdf <- data.frame(Var = c(""), NAp = c(""), stringsAsFactors=FALSE)
+    for (i in 1:length(colnames(df))){
+        tmpdf[i,1] <- colnames(df)[i]
+        tmpdf[i,2] <- as.numeric(sum(is.na(df[,i]))/length(df[,i]))
+    }
+    return (tmpdf)
+}
+
+cols_t <- nacheck(training)[,2] == 0
+training <- training[,cols_t]
+rm(cols_t, nacheck)
+
+# remove X, user name and time stamps
+training <- training[,!colnames(training) %in% c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2")]
+
+# split training to tranining and validation data set
+inTrain <- createDataPartition(training$classe, p = 0.7, list = FALSE)
+r_training <- training[inTrain, ]
+validation <- training[-inTrain,]
+training <- r_training
+rm(inTrain, r_training)
+```
+
+We ended up with less number of columns (89), but still there are too many variables for any ML algorithm to process quickly. We will use Boruta package to automatically select features and detect which columns makes sense to use further.
+
+```{r echo=FALSE, include=TRUE}
+library(Boruta)
+boruta_output <- Boruta(classe ~., data = training, doTrace = 0)
+```
+
+This chart shows features analysed by Boruta, red ones are not important and will be removed, and green ones are confirmed as significant for further analysis
+
+```{r echo=TRUE, include=TRUE}
+plot(boruta_output)
+
+# review of tentative features, if any
+final_boruta <- TentativeRoughFix(boruta_output)
+boruta.df <- attStats(final_boruta)
+boruta.df <- boruta.df[boruta.df$decision == "Confirmed",]
+features <- c(row.names(boruta.df),"classe")
+rm(boruta_output, final_boruta,boruta.df)
+
+training <- training[,features]
+validation <- validation[,features]
+
+```
+
+Now we found which features are important, and reduced number of columns from 160 to just 55.
+In order to process such number of variables with approx 14 000 observations we need to set up parallel processing on several processor cores.
+
+We will use following model types and then select the most effective one among them:
+
+- Random Forest
+
+- Boosting
+
+- Linear Discriminant Analysis
+
+
+```{r echo=TRUE, include=TRUE}
+
+# configure parallel processing
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+# set cross validation to 5 and allow parallel processing
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+
+mod_rf <- train(classe ~., data = training, method = "rf", trControl = fitControl)
+mod_gbm <- train(classe ~., data = training, method = "gbm", trControl = fitControl)
+mod_lda <- train(classe ~., data = training, method = "lda", trControl = fitControl)
+
+# stopping parallel processing
+stopCluster(cluster)
+registerDoSEQ()
+
+
+```
+
+Now we check on validation data set, which model performed better, and use it on testing data set to predict outcome of exercise from the raw sensor data.
+
+
+```{r echo=TRUE, include=TRUE}
+
+print(paste("Random Forest accuracy is:", confusionMatrix(predict(mod_rf, validation), validation$classe)$overall[1]))
+print(paste("Boosting accuracy is:", confusionMatrix(predict(mod_gbm, validation), validation$classe)$overall[1]))
+print(paste("Linear Discriminant Analysis accuracy is:", confusionMatrix(predict(mod_lda, validation), validation$classe)$overall[1]))
+
+testing <- testing[,features[1:54]]
+
+answer <- predict(mod_rf,testing)
+
+print("Predicted outcome for our 20 test cases: ")
+print(answer)
+
+```
+
+**Conclusion:**
+
+As we can see Random Forest is the best performed model with accuracy 99,83 %
+We can use developed model to predict the exercise outcome for further sensors data.
